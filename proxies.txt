@@ -1,0 +1,8 @@
+# Please add your proxies in the following accepted formats without the comment symbol (#):
+# 1. username:password@ip:port
+# 2. username:password:ip:port
+# 3. ip:port:username:password
+# 4. ip:port@username:password
+# 5. ip:port
+# Example proxy:
+# nrmabx99:uixx9xdoszu9@99.999.99.999:9999
