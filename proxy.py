@@ -134,9 +134,9 @@ def test_proxies(url, format_type, use_user_agent, timeout, num_workers, save_fi
         result_file = os.path.join(current_dir, 'result.txt')
         with open(result_file, "w") as file:
             file.write(f"Proxy timeout: {timeout}")
-            file.write(f"URL: {url}\n")
-            file.write(f"User Agent: {'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' if use_user_agent else 'None'}\n")
-            file.write("Results (fastest to slowest):\n")
+            file.write(f"\nURL: {url}")
+            file.write(f"\nUser Agent: {'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' if use_user_agent else 'None'}")
+            file.write("\nResults (fastest to slowest):\n")
             for result in results:
                 if 'status_code' in result:
                     file.write(f"\nStatus Code: {result['status_code']}, Time Taken: {result['time_taken']:.2f} seconds, Proxy: {result['proxy']}")
