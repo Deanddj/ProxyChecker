@@ -36,7 +36,7 @@ ip:port
 ### Run the Script
 Run the script and follow the prompts to test your proxies:
 ```
-python proxy_tester.py
+python proxy.py
 ```
 
 ### Proxy Formats
