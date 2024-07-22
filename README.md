@@ -1,5 +1,5 @@
-# Proxy Tester
-Proxy Tester is a tool designed for testing multiple proxies against a specified URL, measuring the response time for each request.
+# Proxy Checker
+Proxy Checker is a tool designed for testing multiple proxies against a specified URL, measuring the response time for each request.
 
 ## Features
 - Supports multiple proxy formats
@@ -21,26 +21,8 @@ Install the required Python packages using pip:
 pip install -r requirements.txt
 ```
 ## Usage
-### Configure Proxies
-Add your proxies in the proxies.txt file located in the project directory.              
-Ensure each proxy is formatted correctly based on the supported formats.
-
-Example:
-```
-username:password@ip:port
-ip:port:username:password
-ip:port@username:password
-ip:port
-```
-
-### Run the Script
-Run the script and follow the prompts to test your proxies:
-```
-python proxy.py
-```
-
 ### Proxy Formats
-The proxies.txt file should contain proxies in one of the following formats:
+The `proxies.txt` file should contain proxies in one of the following formats:
 
 ```
 username:password@ip:port
@@ -49,9 +31,20 @@ ip:port:username:password
 ip:port@username:password
 ip:port
 ```
+
+### Configure Proxies
+Add your proxies in the `proxies.txt` file located in the project directory.              
+Ensure each proxy is formatted correctly based on the supported formats.
+
 Example:
 ```
 nrmabx99:uixx9xdoszu9@99.999.99.999:9999
 ```
+
+### Run the Script
+Run the script and follow the prompts to test your proxies:
+```
+python proxy.py
+```
 ## License
-This project is licensed under the GNU GPLv3 License.
+This project is licensed under the [GNU GPLv3 License](LICENSE).
