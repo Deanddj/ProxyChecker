@@ -31,6 +31,7 @@ ip:port:username:password
 ip:port@username:password
 ip:port
 ```
+*Note: You can mix multiple formats within the same file.*
 
 ### Configure Proxies
 Add your proxies in the `proxies.txt` file located in the project directory.              
