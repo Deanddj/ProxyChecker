@@ -4,29 +4,43 @@ import os
 import threading
 from queue import Queue
 from urllib.parse import urlparse
+import re
+
+# Define patterns for each format
+patterns = {
+    'username:password@ip:port': re.compile(r'^\w+:\w+@\d+\.\d+\.\d+\.\d+:\d+$'),
+    'username:password:ip:port': re.compile(r'^\w+:\w+:\d+\.\d+\.\d+\.\d+:\d+$'),
+    'ip:port:username:password': re.compile(r'^\d+\.\d+\.\d+\.\d+:\d+:\w+:\w+$'),
+    'ip:port@username:password': re.compile(r'^\d+\.\d+\.\d+\.\d+:\d+@\w+:\w+$'),
+    'ip:port': re.compile(r'^\d+\.\d+\.\d+\.\d+:\d+$')
+}
+
+def detect_proxy_format(proxy):
+    for format_name, pattern in patterns.items():
+        if pattern.match(proxy):
+            return format_name
+    return 'Unknown format'
 
 # Function to format the proxy string for requests
-def format_proxy(proxy, format_type):
+def format_proxy(proxy, format_name):
     try:
-        if format_type == 1:
+        if format_name == 'username:password@ip:port':
             proxy_auth, proxy_ip_port = proxy.split('@')
-        elif format_type == 2:
+        elif format_name == 'username:password:ip:port':
             parts = proxy.split(':')
             proxy_auth = f"{parts[0]}:{parts[1]}"
             proxy_ip_port = f"{parts[2]}:{parts[3]}"
-        elif format_type == 3:
+        elif format_name == 'ip:port:username:password':
             parts = proxy.split(':')
-            if len(parts) != 4:
-                raise ValueError("Invalid format for type 3: ip:port:username:password")
             proxy_ip_port = f"{parts[0]}:{parts[1]}"
             proxy_auth = f"{parts[2]}:{parts[3]}"
-        elif format_type == 4:
+        elif format_name == 'ip:port@username:password':
             proxy_ip_port, proxy_auth = proxy.split('@')
-        elif format_type == 5:
+        elif format_name == 'ip:port':
             proxy_ip_port = proxy
             proxy_auth = ''
         else:
-            raise ValueError("Invalid format type")
+            raise ValueError("Invalid format name")
 
         return f'http://{proxy_auth}@{proxy_ip_port}' if proxy_auth else f'http://{proxy_ip_port}'
     except (ValueError, IndexError) as e:
@@ -36,10 +50,10 @@ def format_proxy(proxy, format_type):
         }
 
 # Function to visit the webpage with a specified proxy
-def visit_webpage(url, proxy, format_type, use_user_agent, timeout):
+def visit_webpage(url, proxy, format_name, use_user_agent, timeout):
     proxies = {
-        'http': format_proxy(proxy, format_type),
-        'https': format_proxy(proxy, format_type),
+        'http': format_proxy(proxy, format_name),
+        'https': format_proxy(proxy, format_name),
     }
 
     if isinstance(proxies['http'], dict):  # Check if proxy formatting failed
@@ -48,7 +62,6 @@ def visit_webpage(url, proxy, format_type, use_user_agent, timeout):
             'time_taken': float('inf'),
             'proxy': proxy
         }
-
 
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'} if use_user_agent else {}
 
@@ -70,7 +83,6 @@ def visit_webpage(url, proxy, format_type, use_user_agent, timeout):
             'proxy': proxy
         }
 
-
     except requests.exceptions.RequestException as e:
         return {
             'error': str(e),
@@ -79,17 +91,18 @@ def visit_webpage(url, proxy, format_type, use_user_agent, timeout):
         }
 
 # Worker function for threading
-def worker(url, format_type, use_user_agent, timeout, results, queue):
+def worker(url, use_user_agent, timeout, results, queue):
     while True:
         proxy = queue.get()
         if proxy is None:
             break
-        result = visit_webpage(url, proxy, format_type, use_user_agent, timeout)
+        format_name = detect_proxy_format(proxy)
+        result = visit_webpage(url, proxy, format_name, use_user_agent, timeout)
         results.append(result)
         queue.task_done()
 
 # Main function to test all proxies and sort results
-def test_proxies(url, format_type, use_user_agent, timeout, num_workers, save_file):
+def test_proxies(url, use_user_agent, timeout, num_workers, save_file):
     results = []
     current_dir = os.path.dirname(os.path.abspath(__file__))
     proxies_file = os.path.join(current_dir, 'proxies.txt')
@@ -102,17 +115,13 @@ def test_proxies(url, format_type, use_user_agent, timeout, num_workers, save_fi
              print("\nThe proxies.txt file doesn't contain any valid proxies. Please add proxies and try again.")
              return
 
-    if format_type < 1 or format_type > 5:
-        print("\nInvalid format type. Please enter a number between 1 and 5.")
-        return
-
     queue = Queue()
     for proxy in proxies_list:
         queue.put(proxy)
 
     threads = []
     for _ in range(num_workers):
-        thread = threading.Thread(target=worker, args=(url, format_type, use_user_agent, timeout, results, queue))
+        thread = threading.Thread(target=worker, args=(url, use_user_agent, timeout, results, queue))
         thread.daemon = True
         threads.append(thread)
         thread.start()
@@ -200,29 +209,12 @@ if __name__ == "__main__":
     if not check_and_create_proxies_file():
         pass
     else:
-        print("Select the format of the proxy list:")
-        print("1. username:password@ip:port")
-        print("2. username:password:ip:port")
-        print("3. ip:port:username:password")
-        print("4. ip:port@username:password")
-        print("5. ip:port\n")
-
-        while True:
-            try:
-                format_type = int(input("Enter the number corresponding to the proxy list format: "))
-                if format_type < 1 or format_type > 5:
-                    print("\nInvalid format type. Please enter a number between 1 and 5.")
-                else:
-                    break
-            except ValueError:
-                print("\nInvalid input. Please enter a valid number.")
-
         url = prompt_for_url()
         use_user_agent = prompt_for_yes_no("Would you like to use a User-Agent? (Y/n) ")
         timeout = prompt_for_int("Enter the timeout for proxy requests (default is 10 seconds): ", 10)
         num_workers = prompt_for_int("Enter the number of worker threads (default is 10): ", 10)
         save_file = prompt_for_yes_no("Would you like to save the results in a file? (Y/n) ")
 
-        test_proxies(url, format_type, use_user_agent, timeout, num_workers, save_file)
+        test_proxies(url, use_user_agent, timeout, num_workers, save_file)
 
     input("\nPress enter to continue...")
