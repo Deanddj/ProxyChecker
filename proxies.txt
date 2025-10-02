@@ -1,8 +1,20 @@
-# Please add your proxies in the following accepted formats without the comment symbol (#):
-# 1. username:password@ip:port
-# 2. username:password:ip:port
-# 3. ip:port:username:password
-# 4. ip:port@username:password
-# 5. ip:port
-# Example proxy:
-# nrmabx99:uixx9xdoszu9@99.999.99.999:9999
+# Add one proxy per line. Lines starting with '#' are ignored.
+# Supported formats (examples):
+#  - Scheme-prefixed (recommended for SOCKS):
+#      socks5://user:pass@1.2.3.4:1080
+#      socks4://1.2.3.4:1080
+#      http://1.2.3.4:8080
+#  - Legacy/shorthand (the script normalizes these):
+#      username:password@ip:port
+#      username:password:ip:port
+#      ip:port:username:password
+#      ip:port@username:password
+#      ip:port
+# Examples (uncomment to use):
+# socks5://user:pass@185.221.160.134:1080
+# http://185.221.160.134:80
+# 185.221.160.134:8080
+# username:password@185.221.160.134:8080
+# IPv6 example (with port):
+# [2001:db8::1]:8080
+# After editing this file, re-run the script.
