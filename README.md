@@ -1,75 +1,68 @@
 # ProxyChecker
 
-A simple, fast proxy testing utility that performs a two-stage scan:
+Fast proxy scanner with a two-stage flow:
 
-1. Fast TCP + CONNECT probe to quickly filter reachable proxies.
-2. Optional full HTTP probe (custom URL, headers, method, and flexible content checks).
+1) Fast probe: TCP connect + HTTP CONNECT check to quickly filter proxies.
+2) Optional full HTTP scan with configurable URL, method, headers, body, matching, and retries.
 
-The script supports HTTP and SOCKS proxies (provide scheme for SOCKS: `socks5://...`).
-
-## Features
-
-- Fast TCP and optional CONNECT probe for quick filtering.
-- Full HTTP tests with customizable method, headers, body, redirects and retries.
-- Flexible content checks: substring (`--expect-text`) or regex (`--expect-regex`).
-- Per-worker connection reuse via requests.Session.
-- Graceful Ctrl+C handling and progress output.
+Supports HTTP and SOCKS proxies (prefix SOCKS proxies with a scheme, e.g., `socks5://...`).
 
 ## Install
 
-1. Clone the repository:
-
-```bash
-git clone https://github.com/deanddj/ProxyChecker.git
-cd ProxyChecker
-```
-
-2. Install dependencies:
-
-```bash
+```powershell
 pip install -r requirements.txt
 ```
 
-(Requires Python 3.8+)
+Python 3.8+ recommended.
 
-## Usage
+## Quick start
 
-Basic usage with the default `proxies.txt` file:
+Put proxies in `proxies.txt` (one per line). Then:
 
 ```powershell
-python .\\proxy.py --url "https://example.com/" --expect-text "Welcome" --timeout 10
+# Fast probe only (saves results.txt by default)
+python .\proxy.py -p .\proxies.txt --timeout 8
+
+# Full HTTP scan against a URL, save JSON
+python .\proxy.py -p .\proxies.txt --url "https://example.com/" --expect-text "Welcome" --output-file json
 ```
 
-Common flags
+Results are always written as one of: `results.txt`, `results.json`, or `results.csv` depending on `--output-file` (default: plain -> results.txt). Use `--no-save` to skip writing files.
 
-- `-p, --proxies <path>` — path to your proxies file (default: `./proxies.txt`).
-- `--timeout <n>` — global timeout in seconds (used for both fast and full scans).
-- `--workers <n>` — number of worker threads (default: recommended based on proxy count).
-- `--no-save` — do not write output files.
+## Options (summary)
 
-Full-scan options
+- `-p, --proxies <path>`: Path to proxies file (lines starting with `#` are ignored). Supports scheme-prefixed (`socks5://`, `http://`) and shorthand formats.
+- `-w, --workers <n>`: Worker threads. If omitted, a safe recommendation is used (~2.5% of proxies, min 10, max 300).
+- `-t, --timeout <sec>`: Overall timeout used for both fast and full HTTP requests.
+- `-c, --connect-target <host[:port]>`: Target used by the fast probe when issuing HTTP CONNECT.
+- `-S, --no-save`: Do not write results files; only print progress and summary.
+- `-o, --output-file {plain,json,csv}`: Choose results format: plain -> `results.txt` (working proxies one per line), json -> `results.json` (JSON array), csv -> `results.csv`.
+- `-s, --save-snippet <N>`: Include first N characters of response in JSON/CSV outputs.
+- `-k, --require-connect`: Keep only proxies that returned HTTP 200 to CONNECT in the fast probe (also affects fast-only save).
 
-- `--url` — target URL for the full HTTP scan.
-- `--ua` / `--no-ua` — provide or disable User-Agent header.
-- `--method` — HTTP method (GET/POST/...)
-- `--header` — repeatable header `--header "Key: Value"`.
-- `--data` — request body for POST/PUT.
-- `--accept-statuses` — comma-separated acceptable status codes (default 200).
-- `--expect-text` — case-insensitive substring match after normalization.
-- `--expect-regex` — case-insensitive regex match (recommended for class tokens or tag-split text).
-- `--no-redirects` — do not follow redirects.
-- `--retries` — retry count for full HTTP requests.
+Full-scan (provide any of these to trigger a full HTTP scan in addition to the fast probe):
 
-### Proxy file formats
+- `-u, --url <URL>`: Target URL for the full HTTP test. In PowerShell, quote URLs with `&`.
+- `-U, --ua <string>` / `--no-ua`: Custom User-Agent string or omit the header entirely.
+- `-m, --method <VERB>`: HTTP method (e.g., GET, POST, HEAD, PUT).
+- `-H, --header 'Key: Value'` (repeatable): Add custom headers.
+- `-d, --data <body>`: Raw request body (set Content-Type via `--header` as needed).
+- `-A, --accept-statuses 200,204,302`: Comma-separated acceptable status codes (default is 200 if not provided).
+- `-e, --expect-text <text>`: Case-insensitive substring after normalization (handles smart quotes/whitespace). Use `--strict-expect` to disable the loose fallback.
+- `-E, --expect-regex <pattern>`: Case-insensitive regex (tested on raw body, then on normalized body). Good for matching tokens or text split by tags.
+- `-R, --no-redirects`: Do not follow redirects in the full HTTP test.
+- `-r, --retries <n>`: Retries on request errors (total attempts = `n` + 1).
+- `-x, --strict-expect`: Only strict expect-text matching (no loose punctuation-stripped fallback).
 
-One proxy per line. Supported forms:
+## Proxy formats
+
+Supported per-line formats:
 
 - Scheme-prefixed (recommended for SOCKS):
   - `socks5://user:pass@1.2.3.4:1080`
   - `socks4://1.2.3.4:1080`
   - `http://1.2.3.4:8080`
-
-- Legacy shorthand (normalized by script):
+- Shorthand (normalized automatically):
   - `username:password@ip:port`
   - `username:password:ip:port`
   - `ip:port:username:password`
@@ -78,29 +71,15 @@ One proxy per line. Supported forms:
 
 ## Regex tips (PowerShell)
 
-- Use single quotes in PowerShell to avoid variable expansion: `'\\bx1ga7v0g\\b'`.
+- Prefer single quotes in PowerShell to avoid expansions: `'\bx1ga7v0g\b'`.
 - Examples:
   - Match a class token anywhere: `--expect-regex '\\bxexx8yu\\b'`
-  - Match 'Log in' even if split by tags: `--expect-regex 'log(?:\\s|<[^>]*>)*in'`
-  - Combine class + inner text: `--expect-regex '(?s)<div[^>]*class="[^"]*\\bxexx8yu\\b[^"]*"[^>]*>.*?log(?:\\s|<[^>]*>)*in.*?</div>'`
+  - Match "Log in" even through HTML tags: `--expect-regex 'log(?:\\s|<[^>]*>)*in'`
 
-## Safety and tuning
+## Notes
 
-- The default worker recommendation is conservative but depends on your machine. Monitor CPU, memory, open files (ulimit -n on Linux), and TIME_WAIT sockets when running large scans.
-- For SOCKS support install `pysocks` (in `requirements.txt`).
-
-## Examples
-
-- Fast-only (no URL):
-```powershell
-python .\\proxy.py -p .\\proxies.txt --timeout 5 --no-save
-```
-
-- Full HTTP scan with regex matching:
-```powershell
-python .\\proxy.py -p .\\proxies.txt --url "https://www.example.com/" --expect-regex '\\blogin\\b' --timeout 8
-```
+- Ctrl+C gracefully cancels work and exits.
+- For SOCKS support, `pysocks` is already listed in `requirements.txt`.
 
 ## License
-
-This project is provided under the GNU GPLv3 license (see LICENSE file).
+This project is licensed under the [GNU GPLv3 License](LICENSE).

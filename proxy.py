@@ -18,39 +18,84 @@ from urllib.parse import urlparse
 import re
 import unicodedata
 
+
+def _write_results_file(results, out_path, out_fmt):
+    """Write results to out_path using out_fmt in {'txt','json','csv'}.
+
+    results may be a list of proxy strings or a list of dicts.
+    For 'txt' we write one proxy per line (for dicts we write proxies where ok==True).
+    For 'json' we write JSON Lines of the dicts. For 'csv' we write a CSV with all keys.
+    """
+    try:
+        if out_fmt == 'json':
+            # Write a single valid JSON array to make the file parseable by JSON parsers.
+            import json
+            out_list = []
+            for r in results:
+                if isinstance(r, str):
+                    out_list.append({'proxy': r})
+                else:
+                    out_list.append(r)
+            with open(out_path, 'w', encoding='utf-8') as jf:
+                json.dump(out_list, jf, ensure_ascii=False, indent=2)
+        elif out_fmt == 'csv':
+            import csv
+            # Collect keys from dict results
+            keys = set()
+            for r in results:
+                if isinstance(r, dict):
+                    keys.update(r.keys())
+            keys = list(sorted(keys))
+            with open(out_path, 'w', encoding='utf-8', newline='') as cf:
+                writer = csv.DictWriter(cf, fieldnames=keys or ['proxy'])
+                writer.writeheader()
+                for r in results:
+                    if isinstance(r, str):
+                        writer.writerow({'proxy': r})
+                    else:
+                        writer.writerow({k: r.get(k, '') for k in keys})
+        else:
+            # plain text: write proxies one-per-line
+            with open(out_path, 'w', encoding='utf-8') as tf:
+                for r in results:
+                    if isinstance(r, str):
+                        tf.write(f"{r}\n")
+                    else:
+                        if r.get('ok'):
+                            tf.write(f"{r.get('proxy')}\n")
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
 def detect_proxy_format(proxy):
     """Detect common proxy string formats.
 
     Returns one of the format keys used elsewhere, or 'url_with_scheme' when the
-    proxy contains an explicit scheme (http://, https://, socks5://, socks4://).
-    Falls back to 'Unknown format' when it can't be parsed.
+    proxy contains an explicit scheme. Falls back to 'Unknown format'.
     """
     proxy = (proxy or '').strip()
     if not proxy:
         return 'Unknown format'
 
-    # Scheme-prefixed proxies (e.g. socks5://..., http://...)
+    # Scheme-prefixed proxies
     if '://' in proxy:
         return 'url_with_scheme'
 
     # username:password@host:port  or host:port@username:password
     if '@' in proxy:
         left, right = proxy.split('@', 1)
-        # left looks like user:pass and right like ip:port
         if left.count(':') >= 1 and right.count(':') == 1:
             return 'username:password@ip:port'
-        # left looks like ip:port and right like user:pass
         if left.count(':') == 1 and right.count(':') >= 1:
             return 'ip:port@username:password'
 
-    # bracketed IPv6 with port e.g. [2001:db8::1]:8080
+    # bracketed IPv6 with port
     if proxy.startswith('[') and ']:' in proxy:
         return 'ip:port'
 
     parts = proxy.split(':')
     # username:password:ip:port or ip:port:username:password
     if len(parts) == 4:
-        # heuristic: if first part looks like an IP, assume ip:port:username:password
         if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', parts[0]):
             return 'ip:port:username:password'
         return 'username:password:ip:port'
@@ -63,8 +108,6 @@ def detect_proxy_format(proxy):
 
 # Function to format the proxy string for requests
 def format_proxy(proxy, format_name):
-    # If the proxy string already contains a scheme (e.g. socks5://, http://), return it as-is.
-    # This enables SOCKS support when users provide proxies like: socks5://user:pass@ip:port
     if '://' in proxy:
         return proxy
     try:
@@ -94,10 +137,7 @@ def format_proxy(proxy, format_name):
         }
 
 def _parse_connect_target(target_str, default_port=443):
-    """Parse a connect target which may be 'host' or 'host:port'.
-
-    Returns (host, port_int). If port is missing or invalid, uses default_port.
-    """
+    """Parse a connect target which may be 'host' or 'host:port'."""
     try:
         if not target_str:
             return 'example.com', int(default_port)
@@ -122,10 +162,7 @@ def _parse_connect_target(target_str, default_port=443):
         return 'example.com', int(default_port)
 
 def _read_http_status_line(sock, max_bytes=1024):
-    """Read until CRLF for the status line and parse HTTP status code.
-
-    Returns integer status code or None on failure.
-    """
+    """Read until CRLF for the status line and parse HTTP status code."""
     try:
         buf = b''
         while b'\r\n' not in buf and len(buf) < max_bytes:
@@ -170,11 +207,13 @@ def visit_webpage(
     accept_statuses=None,
     expect_text=None,
     expect_regex=None,
+    save_snippet_size=0,
+    strict_expect=False,
     retries=0,
 ):
     """Visit a webpage using the provided proxy.
 
-    user_agent: None -> no UA header, or string -> set as User-Agent header.
+    user_agent: None means do not send a User-Agent header.
     """
     proxies = {
         'http': format_proxy(proxy, format_name),
@@ -191,19 +230,13 @@ def visit_webpage(
     headers = {'User-Agent': user_agent} if user_agent else {}
     if extra_headers:
         try:
-            # merge/override
             headers.update(extra_headers)
         except Exception:
             pass
-
     try:
-        # If an initial tcp check result from the fast pass is provided, use it
-        # instead of performing another quick TCP connect here. This keeps the
-        # final summary consistent with the fast pass filtering.
         if initial_tcp_ok is not None:
             tcp_ok = bool(initial_tcp_ok)
         else:
-            # quick TCP-level reachability check (timeout controlled by fast_timeout)
             tcp_ok = False
             try:
                 parsed = urlparse(proxies['http'])
@@ -215,7 +248,6 @@ def visit_webpage(
             except Exception:
                 tcp_ok = False
 
-        # perform the HTTP request with optional retries
         attempts = int(retries) + 1
         last_exc = None
         response = None
@@ -230,7 +262,6 @@ def visit_webpage(
             except requests.exceptions.RequestException as e:
                 last_exc = e
                 response = None
-                # if more attempts remain, continue; else fall through to error handling
                 continue
         time_taken = time.time() - start_time
 
@@ -245,33 +276,26 @@ def visit_webpage(
                 'tcp_ok': tcp_ok
             }
 
-        # success criteria
         accepted = set(accept_statuses) if accept_statuses else {200}
         status_ok = response.status_code in accepted
         content_ok = True
-        # If an expect_regex is provided, try it first (case-insensitive).
+
         if expect_regex:
             try:
-                # Try raw response first
                 if re.search(expect_regex, response.text or '', flags=re.IGNORECASE):
                     content_ok = True
                 else:
-                    # fallback: try on normalized text as well
                     normalized_resp = _normalize_for_match(response.text or '')
                     if re.search(expect_regex, normalized_resp, flags=re.IGNORECASE):
                         content_ok = True
                     else:
                         content_ok = False
             except re.error:
-                # Invalid regex -> treat as non-matching
                 content_ok = False
             except Exception:
                 content_ok = False
         elif expect_text:
             try:
-                # Normalize both expected text and response body to improve matching.
-                # This handles curly quotes, replacement characters, and odd Unicode
-                # punctuation that may appear due to site encoding differences.
                 def _normalize_for_match(s: str) -> str:
                     if s is None:
                         return ''
@@ -279,18 +303,15 @@ def visit_webpage(
                         ns = unicodedata.normalize('NFKC', s)
                     except Exception:
                         ns = s
-                    # map common smart quotes to ASCII equivalents
                     ns = ns.replace('\u2019', "'").replace('\u2018', "'")
                     ns = ns.replace('\u201c', '"').replace('\u201d', '"')
-                    # replace replacement char with apostrophe (common when encoding mismatches occur)
                     ns = ns.replace('\ufffd', "'")
-                    # collapse whitespace
                     ns = re.sub(r'\s+', ' ', ns)
                     return ns.strip().lower()
 
                 normalized_resp = _normalize_for_match(response.text or '')
                 normalized_expect = _normalize_for_match(expect_text)
-                # Also try a loose match that strips punctuation (but keeps hyphens)
+
                 def _loose_strip(s: str) -> str:
                     return re.sub(r"[^\w\s-]", '', s)
 
@@ -303,16 +324,24 @@ def visit_webpage(
                 )
             except Exception:
                 content_ok = False
+
         ok = bool(status_ok and content_ok)
 
-        return {
+        out = {
             'status_code': response.status_code,
             'time_taken': time_taken,
             'proxy': proxy,
             'tcp_ok': tcp_ok,
-            'ok': ok
+            'ok': ok,
         }
+        try:
+            if save_snippet_size and isinstance(save_snippet_size, int) and save_snippet_size > 0:
+                snippet = (response.text or '')[:int(save_snippet_size)]
+                out['snippet'] = snippet
+        except Exception:
+            pass
 
+        return out
     except requests.exceptions.RequestException as e:
         return {
             'error': str(e),
@@ -322,13 +351,11 @@ def visit_webpage(
         }
 
 
-# Global event used to signal threads to stop when the user requests cancellation
+# Stop threads when the user requests cancellation
 shutdown_event = threading.Event()
-
 
 def print_progress(processed, total, bar_len=40):
     """Print a simple progress bar to the console."""
-    # don't print progress anymore once shutdown has been requested
     if shutdown_event.is_set():
         return
     if total <= 0:
@@ -368,13 +395,10 @@ def fast_pass(proxies_list, timeout, num_workers, connect_target='example.com', 
                     parsed = urlparse(formatted)
                     host = parsed.hostname
                     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-                    # Single socket: establish once
-                    # fast_timeout controls how long the fast probe waits (seconds)
                     conn_timeout = min(fast_timeout, timeout)
                     s = socket.create_connection((host, port), timeout=conn_timeout)
                     s.settimeout(conn_timeout)
                     tcp_ok = True
-                    # Build CONNECT request using provided connect_target (may include :port)
                     tgt_host, tgt_port = _parse_connect_target(connect_target, default_port=443)
                     connect_req = f"CONNECT {tgt_host}:{tgt_port} HTTP/1.1\r\nHost: {tgt_host}:{tgt_port}\r\n\r\n"
                     s.sendall(connect_req.encode('utf-8'))
@@ -390,7 +414,6 @@ def fast_pass(proxies_list, timeout, num_workers, connect_target='example.com', 
 
                 results.append({'proxy': proxy, 'tcp_ok': tcp_ok, 'connect_ok': connect_ok})
 
-                # progress update
                 if progress is not None and lock is not None:
                     with lock:
                         progress['count'] += 1
@@ -400,7 +423,6 @@ def fast_pass(proxies_list, timeout, num_workers, connect_target='example.com', 
         finally:
             pass
 
-    # start threads
     progress = {'count': 0}
     lock = threading.Lock()
     threads = []
@@ -423,7 +445,6 @@ def fast_pass(proxies_list, timeout, num_workers, connect_target='example.com', 
             time.sleep(0.1)
     except KeyboardInterrupt:
         shutdown_event.set()
-        # re-raise so the top-level handler can perform an immediate exit
         raise
 
     # If shutdown was requested, drain the queue so q.join won't block forever
@@ -438,7 +459,6 @@ def fast_pass(proxies_list, timeout, num_workers, connect_target='example.com', 
         except Empty:
             pass
 
-    # ensure queue is drained to let threads exit
     try:
         q.join()
     except Exception:
@@ -449,8 +469,7 @@ def fast_pass(proxies_list, timeout, num_workers, connect_target='example.com', 
 
 # Worker function for threading
 def worker(url, user_agent, timeout, results, queue, progress=None, lock=None, total_proxies=0, initial_tcp_map=None, fast_timeout=5.0,
-           method='GET', extra_headers=None, data=None, allow_redirects=True, accept_statuses=None, expect_text=None, expect_regex=None, retries=0):
-    # create a Session per worker for connection reuse
+           method='GET', extra_headers=None, data=None, allow_redirects=True, accept_statuses=None, expect_text=None, expect_regex=None, save_snippet_size=0, strict_expect=False, retries=0):
     session = requests.Session()
     try:
         while not shutdown_event.is_set():
@@ -462,7 +481,6 @@ def worker(url, user_agent, timeout, results, queue, progress=None, lock=None, t
                 queue.task_done()
                 break
             format_name = detect_proxy_format(proxy)
-            # pass along any initial TCP check result from the fast pass to keep counts consistent
             initial_tcp_ok = None
             if initial_tcp_map is not None:
                 initial_tcp_ok = initial_tcp_map.get(proxy)
@@ -470,10 +488,9 @@ def worker(url, user_agent, timeout, results, queue, progress=None, lock=None, t
                 url, proxy, format_name, user_agent, timeout,
                 session=session, initial_tcp_ok=initial_tcp_ok, fast_timeout=fast_timeout,
                 method=method, extra_headers=extra_headers, data=data, allow_redirects=allow_redirects,
-                accept_statuses=accept_statuses, expect_text=expect_text, expect_regex=expect_regex, retries=retries
+                accept_statuses=accept_statuses, expect_text=expect_text, expect_regex=expect_regex, save_snippet_size=save_snippet_size, strict_expect=strict_expect, retries=retries
             )
             results.append(result)
-            # update progress
             if progress is not None and lock is not None:
                 with lock:
                     progress['count'] += 1
@@ -487,7 +504,7 @@ def worker(url, user_agent, timeout, results, queue, progress=None, lock=None, t
 
 # Main function to test all proxies and sort results
 def test_proxies(url, user_agent, timeout, num_workers, save_file, proxies_list=None, initial_tcp_map=None, fast_timeout=5.0,
-                 method='GET', extra_headers=None, data=None, allow_redirects=True, accept_statuses=None, expect_text=None, expect_regex=None, retries=0):
+                 method='GET', extra_headers=None, data=None, allow_redirects=True, accept_statuses=None, expect_text=None, expect_regex=None, save_snippet_size=0, strict_expect=False, require_connect=False, retries=0):
     results = []
     current_dir = os.path.dirname(os.path.abspath(__file__))
     proxies_file = os.path.join(current_dir, 'proxies.txt')
@@ -507,24 +524,21 @@ def test_proxies(url, user_agent, timeout, num_workers, save_file, proxies_list=
 
     threads = []
 
-    # prepare progress tracking
     progress = {'count': 0}
     lock = threading.Lock()
 
-    # show initial progress (0%) so user sees the progress bar immediately
     print_progress(0, len(proxies_list))
 
     for _ in range(num_workers):
         thread = threading.Thread(
             target=worker,
             args=(url, user_agent, timeout, results, queue, progress, lock, len(proxies_list), initial_tcp_map, fast_timeout,
-                  method, extra_headers, data, allow_redirects, accept_statuses, expect_text, expect_regex, retries)
+                  method, extra_headers, data, allow_redirects, accept_statuses, expect_text, expect_regex, save_snippet_size, strict_expect, retries)
         )
         thread.daemon = True
         threads.append(thread)
         thread.start()
 
-    # send sentinel values so workers exit after processing
     for _ in range(num_workers):
         queue.put(None)
 
@@ -535,7 +549,6 @@ def test_proxies(url, user_agent, timeout, num_workers, save_file, proxies_list=
             time.sleep(0.1)
     except KeyboardInterrupt:
         shutdown_event.set()
-        # re-raise to let top-level handler exit the process
         raise
 
     # If shutdown was requested, drain the queue so q.join won't block forever
@@ -550,13 +563,11 @@ def test_proxies(url, user_agent, timeout, num_workers, save_file, proxies_list=
         except Empty:
             pass
 
-    # attempt graceful shutdown
     try:
         queue.join()
     except Exception:
         pass
 
-    # finish progress line
     print()
 
     results.sort(key=lambda x: x.get('time_taken', float('inf')))
@@ -564,8 +575,14 @@ def test_proxies(url, user_agent, timeout, num_workers, save_file, proxies_list=
     print(f"\nUser Agent: {user_agent if user_agent else 'None'}")
     print(f"URL: {url}")
 
+    # Optionally filter by connect capability
+    if require_connect:
+        pre_filter_len = len(results)
+        results = [r for r in results if r.get('connect_ok')]
+        print(f"\nFiltered by CONNECT capability: {len(results)}/{pre_filter_len} remain")
+
     total = len(results)
-    # mark working by 'ok' only (this takes into account accept_statuses and expect_text)
+    # mark working by 'ok' only (this takes into account accept_statuses and expect_text/regex)
     working = sum(1 for r in results if r.get('ok', False))
     tcp_reachable = sum(1 for r in results if r.get('tcp_ok'))
     failed = total - working
@@ -573,26 +590,8 @@ def test_proxies(url, user_agent, timeout, num_workers, save_file, proxies_list=
     print(f"Summary: {working}/{total} proxies matching criteria, {failed} failed")
     print(f"TCP reachable (fast check): {tcp_reachable}/{total}")
 
-    # Anonymity features removed
-
-    if save_file:
-        # Export working proxies (based on status/criteria) to a separate file only
-        working_file = os.path.join(current_dir, 'working_proxies.txt')
-        # collect proxies that actually matched the acceptance criteria and sort fastest->slowest
-        working = [r for r in results if r.get('ok', False)]
-        # Anonymity-based filtering removed
-        working_sorted = sorted(working, key=lambda x: x.get('time_taken', float('inf')))
-        working_proxies = [r['proxy'] for r in working_sorted]
-
-        try:
-            # write plain proxies file
-            with open(working_file, 'w', encoding='utf-8') as wf:
-                for p in working_proxies:
-                    wf.write(f"{p}\n")
-
-            print(f"\nSaved {len(working_proxies)} working proxies to: {working_file}")
-        except OSError as e:
-            print(f"\nFailed to write working proxies file: {e}")
+    # Return results for further processing (e.g. JSON/CSV export)
+    return results
 
 # Function to check if proxies.txt file exists, create if not
 def check_and_create_proxies_file():
@@ -641,10 +640,6 @@ def recommend_workers(total_proxies):
     rec = max(10, int(total_proxies * 0.025))
     return min(rec, 300)
 
-
-# Anonymity parsing removed
-
-
 def load_proxies_from_file(path):
     """Load proxies from a file, ignoring blank lines and comments."""
     with open(path, 'r', encoding='utf-8') as f:
@@ -676,7 +671,6 @@ def parse_accept_statuses(status_str):
         try:
             out.add(int(p))
         except ValueError:
-            # ignore bad entries
             pass
     return out if out else None
 
@@ -690,7 +684,6 @@ def run_cli(args):
     # Proxies file handling
     if not os.path.exists(proxies_path):
         if proxies_path == default_proxies_path:
-            # Create a template and exit with message
             check_and_create_proxies_file()
             print("No proxies found. A template 'proxies.txt' was created. Please add proxies and rerun.")
             return
@@ -705,10 +698,6 @@ def run_cli(args):
 
     # Defaults
     timeout = args.timeout or 10
-    # User-Agent behavior:
-    # - If --no-ua is passed, don't send a User-Agent header.
-    # - If --ua is passed, use that exact string.
-    # - Otherwise use a sensible default UA string.
     if getattr(args, 'no_ua', False):
         user_agent = None
     else:
@@ -716,9 +705,10 @@ def run_cli(args):
         if ua_arg is not None:
             user_agent = ua_arg
         else:
-            # sensible default UA for reliability
+            # default UA for reliability
             user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
     save_file = not bool(args.no_save)
+
     # Determine whether to run the full scan. Previously this was an explicit --full flag.
     # Now we auto-enable full scan when any full-scan specific option is provided (url, ua, method, header, data, accept-statuses, expect-text, no-redirects, retries).
     full_scan_options = any(getattr(args, name, None) for name in ('url', 'ua', 'method', 'header', 'data', 'accept_statuses', 'expect_text', 'no_redirects', 'retries'))
@@ -751,17 +741,28 @@ def run_cli(args):
     print(f"\nFast probe summary: TCP reachable: {tcp_ok_count}/{total_fast}, CONNECT OK: {connect_ok_count}/{total_fast}")
 
     if fast_only:
-        # Save fast-only results (TCP reachable)
-        passed = [r['proxy'] for r in fast_results if r.get('tcp_ok')]
+        # Save fast-only results: either TCP reachable or CONNECT-capable depending on --require-connect
+        require_connect_flag = bool(getattr(args, 'require_connect', False))
+        if require_connect_flag:
+            passed = [r['proxy'] for r in fast_results if r.get('connect_ok')]
+        else:
+            passed = [r['proxy'] for r in fast_results if r.get('tcp_ok')]
         if save_file:
-            fast_file = os.path.join(current_dir, 'fast_probes.txt')
-            try:
-                with open(fast_file, 'w', encoding='utf-8') as cf:
-                    for p in passed:
-                        cf.write(f"{p}\n")
-                print(f"Saved {len(passed)} fast-probe proxies to: {fast_file}")
-            except OSError as e:
-                print(f"Failed to write fast probe results: {e}")
+            chosen = getattr(args, 'output_file', 'plain') or 'plain'
+            if chosen == 'json':
+                out_path = os.path.join(current_dir, 'results.json')
+                ok, err = _write_results_file(passed, out_path, 'json')
+            elif chosen == 'csv':
+                out_path = os.path.join(current_dir, 'results.csv')
+                ok, err = _write_results_file(passed, out_path, 'csv')
+            else:
+                out_path = os.path.join(current_dir, 'results.txt')
+                ok, err = _write_results_file(passed, out_path, 'txt')
+
+            if ok:
+                print(f"Saved {len(passed)} fast-probe proxies to: {out_path}")
+            else:
+                print(f"Failed to write fast probe results: {err}")
         return
 
     # Full HTTP tests on candidates
@@ -780,7 +781,12 @@ def run_cli(args):
     expect_text = args.expect_text
     expect_regex = getattr(args, 'expect_regex', None)
     retries = int(args.retries or 0)
-    test_proxies(
+    save_snippet_size = int(getattr(args, 'save_snippet', 0) or 0)
+    output_choice = getattr(args, 'output_file', 'plain') or 'plain'
+    strict_expect = bool(getattr(args, 'strict_expect', False))
+    require_connect = bool(getattr(args, 'require_connect', False))
+
+    results = test_proxies(
         url,
         user_agent,
         timeout,
@@ -796,48 +802,66 @@ def run_cli(args):
         accept_statuses=accept_statuses,
         expect_text=expect_text,
         expect_regex=expect_regex,
+        save_snippet_size=save_snippet_size,
+        strict_expect=strict_expect,
+        require_connect=require_connect,
         retries=retries,
     )
 
+    if results is not None and save_file:
+        try:
+            if output_choice == 'json':
+                out_path = os.path.join(current_dir, 'results.json')
+                ok, err = _write_results_file(results, out_path, 'json')
+            elif output_choice == 'csv':
+                out_path = os.path.join(current_dir, 'results.csv')
+                ok, err = _write_results_file(results, out_path, 'csv')
+            else:
+                out_path = os.path.join(current_dir, 'results.txt')
+                ok, err = _write_results_file(results, out_path, 'txt')
+
+            if ok:
+                print(f"\nWrote {len(results)} results to: {out_path}")
+            else:
+                print(f"\nFailed to write output file: {err}")
+        except OSError as e:
+            print(f"\nFailed to write output file: {e}")
+
 if __name__ == "__main__":
-    # CLI-first: parse arguments to decide interactive vs non-interactive
-    parser = argparse.ArgumentParser(description="Proxy Checker")
+    parser = argparse.ArgumentParser(
+        description="Fast proxy scanner with optional full HTTP checks and flexible output",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
 
     # Group: fast probe & common options
     fast_group = parser.add_argument_group('Fast-probe / common options')
-    fast_group.add_argument('-p', '--proxies', help='Path to proxies file (default: ./proxies.txt)')
-    fast_group.add_argument('--workers', type=int, help='Number of worker threads (default: recommend based on proxy count)')
-    fast_group.add_argument('--timeout', type=int, help='Request timeout in seconds (default: 10)')
-    fast_group.add_argument('--connect-target', help='Host or host:port to use for the HTTP CONNECT probe in fast mode (default: example.com:443)')
+    fast_group.add_argument('-p', '--proxies', help='Path to proxies file. Lines starting with # are ignored. Supports scheme-prefixed (socks5://, http://) and shorthand formats.')
+    fast_group.add_argument('-w', '--workers', type=int, help='Number of worker threads. If omitted, a safe recommendation is used (~2.5%% of proxy count, min 10, max 300).')
+    fast_group.add_argument('-t', '--timeout', type=int, help='Overall timeout (seconds) used for both fast and full HTTP requests.')
+    fast_group.add_argument('-c', '--connect-target', help='Host or host:port used by the fast probe when issuing HTTP CONNECT.')
 
     # Group: full-scan specific options
     full_group = parser.add_argument_group('Full-scan options')
-    full_group.add_argument('--url', help='Target URL for full HTTP GET scan (default: https://google.com). If using PowerShell and the URL contains & characters, wrap it in quotes.')
-    # User can override the default User-Agent; use --no-ua to disable sending a UA header
-    full_group.add_argument('--ua', help='Custom User-Agent string to use for full-scan requests (default: sensible browser UA)')
-    full_group.add_argument('--no-ua', action='store_true', help='Do not send a User-Agent header (overrides --ua)')
-    # Note: fast probe timeout is derived from --timeout (single timeout option)
-    # Anonymity flag removed
-    full_group.add_argument('--method', help='HTTP method for full test (default: GET)')
-    full_group.add_argument('--header', action='append', help="Additional HTTP header, e.g. --header 'Authorization: Bearer X' (can repeat) (default: none)")
-    full_group.add_argument('--data', help='Request body for methods like POST/PUT (sent as raw body) (default: none)')
-    full_group.add_argument('--accept-statuses', help='Comma-separated list of acceptable HTTP status codes (default: 200)')
-    full_group.add_argument('--expect-text', help='Substring that must appear in the response body to be considered working (default: none)')
-    full_group.add_argument('--expect-regex', help='Regex that must match the response body to be considered working (case-insensitive). Example: "\\bx1ga7v0g\\b" or "log(?:\\s|<[^>]*>)*in"')
-    full_group.add_argument('--no-redirects', action='store_true', help='Disable following redirects for full HTTP tests (default: follow redirects)')
-    full_group.add_argument('--retries', type=int, help='Number of retry attempts for the full HTTP request on failure (default: 0)')
+    full_group.add_argument('-u', '--url', help='Target URL for the full HTTP scan. In PowerShell, quote URLs with &.')
+    full_group.add_argument('-U', '--ua', help='Custom User-Agent for full-scan requests. Use --no-ua to omit the header entirely.')
+    full_group.add_argument('--no-ua', action='store_true', help='Do not send a User-Agent header (overrides --ua).')
+    full_group.add_argument('-m', '--method', help='HTTP method for full test (e.g., GET, POST, HEAD, PUT).')
+    full_group.add_argument('-H', '--header', action='append', help="Additional HTTP header; can repeat. Example: --header 'Authorization: Bearer X'.")
+    full_group.add_argument('-d', '--data', help='Raw request body for methods like POST/PUT. Set Content-Type via --header when needed.')
+    full_group.add_argument('-A', '--accept-statuses', help='Comma-separated list of acceptable HTTP status codes (e.g., 200,204,302).')
+    full_group.add_argument('-e', '--expect-text', help='Case-insensitive substring after normalization (smart quotes, whitespace). Use --strict-expect to disable loose fallback.')
+    full_group.add_argument('-E', '--expect-regex', help='Case-insensitive regex tested first on raw body, then on normalized body. Example: "\\bx1ga7v0g\\b" or "log(?:\\s|<[^>]*>)*in"')
+    full_group.add_argument('-R', '--no-redirects', action='store_true', help='Do not follow redirects during the full HTTP test.')
+    full_group.add_argument('-r', '--retries', type=int, help='Retry attempts on request errors (total attempts = retries + 1).')
 
-    # Non-interactive mode only: parse args and run
-    parser.add_argument('--no-save', action='store_true', help='Do not save outputs to files (default: save)')
+    parser.add_argument('-S', '--no-save', action='store_true', help='Do not write results.* files; show progress and summary only.')
+    parser.add_argument('-s', '--save-snippet', type=int, help='Include a small response snippet (first N characters) in results (JSON/CSV).')
+    parser.add_argument('-o', '--output-file', choices=['plain', 'json', 'csv'], default='plain',
+                        help='Results output format: plain -> results.txt (working proxies one-per-line), json -> results.json (array), csv -> results.csv.')
+    parser.add_argument('-x', '--strict-expect', action='store_true', help='Only use strict expect-text (disable loose punctuation-stripped fallback).')
+    parser.add_argument('-k', '--require-connect', action='store_true', help='Keep only proxies that returned HTTP 200 to CONNECT in fast probe; fast-only saves only these.')
     args = parser.parse_args()
 
-    # Help Windows PowerShell users: if they forgot to quote a URL with '&' in it,
-    # PowerShell will split the URL into multiple argv tokens. Attempt to
-    # reconstruct the URL from subsequent tokens until the next option (token
-    # that starts with '-'). This makes the CLI more forgiving when users run
-    # commands like:
-    #   python .\proxy.py --url https://.../?a=1&b=2 --expect-text "..."
-    # in PowerShell without quoting the URL.
     try:
         if args.url:
             import sys as _sys
@@ -848,20 +872,16 @@ if __name__ == "__main__":
             else:
                 idx = None
             if idx is not None and idx + 1 < len(argv):
-                # collect tokens after the --url argument until the next option
                 parts = []
                 for tok in argv[idx+1:]:
                     if tok.startswith('-'):
                         break
                     parts.append(tok)
                 if len(parts) > 1:
-                    # join: first part as-is, subsequent parts prefixed with '&'
                     reconstructed = parts[0] + ''.join(t if t.startswith('&') else ('&' + t) for t in parts[1:])
-                    # only overwrite if the reconstructed differs meaningfully
                     if reconstructed != args.url:
                         args.url = reconstructed
     except Exception:
-        # best-effort reconstruction; if anything goes wrong, continue normally
         pass
 
     try:
